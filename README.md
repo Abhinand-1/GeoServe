@@ -1,126 +1,329 @@
 # 🛰️ GeoServe — Self-Hosted Geospatial ML Inference Platform
 
-**GeoServe** is a production-oriented backend and machine learning inference system designed to retrieve satellite imagery on demand from **Google Earth Engine (GEE)**, preprocess multi-spectral bands, and execute geospatial ML inference via **PyTorch** without maintaining a massive local satellite image dataset.
+**GeoServe** is a production-oriented backend and machine learning inference platform for geospatial workloads. It retrieves satellite imagery on demand from **Google Earth Engine (GEE)**, preprocesses multispectral data, and performs geospatial ML inference using **PyTorch** without requiring a large locally maintained satellite imagery dataset.
+
+The system is designed around an asynchronous job-processing architecture, separating API requests from computationally intensive geospatial and ML workloads.
 
 ---
 
 ## 🏗️ System Architecture
 
-```
-User / Client (REST / Dashboard)
+```text
+User / Client
+(REST API / Dashboard)
        │
        ▼
- FastAPI Backend (REST API, Pydantic, Auth)
+ FastAPI Backend
+ (REST API + Pydantic)
        │
        ├─────────────────────────┐
        ▼                         ▼
- SQLModel / PostGIS        Redis Queue (RQ / Async Worker)
- (Job State & Geometries)        │
+ PostgreSQL / PostGIS       Redis + RQ
+ (Job State & Metadata)     (Task Queue)
+                                 │
                                  ▼
                          ML Worker Node
                                  │
               ┌──────────────────┼──────────────────┐
               ▼                  ▼                  ▼
     Google Earth Engine   PyTorch ML Engine    MinIO / Storage
-   (Sentinel-2 Fetcher)   (U-Net LandCover)    (GeoTIFF Rasters)
+     (Sentinel-2 Data)   (Geospatial Models)   (GeoTIFF Outputs)
+```
+
+### Core Processing Flow
+
+```text
+AOI + Date Range + Model
+            │
+            ▼
+       FastAPI API
+            │
+            ▼
+       Create Job
+        (PENDING)
+            │
+            ▼
+      Redis / RQ Queue
+            │
+            ▼
+       ML Worker
+            │
+            ├── Retrieve Sentinel-2 imagery
+            ├── Cloud filtering / preprocessing
+            ├── Multispectral tensor preparation
+            ├── PyTorch inference
+            ├── Raster post-processing
+            ├── GeoTIFF generation
+            └── GeoJSON + statistics
+            │
+            ▼
+     Store Results
+            │
+            ▼
+     COMPLETED / FAILED
 ```
 
 ---
 
 ## ✨ Features
 
-- **On-Demand Sentinel-2 Retrieval**: Queries `COPERNICUS/S2_SR_HARMONIZED` dynamically via Google Earth Engine API using GEE Project `ee-abhinandpsreenivasan1`.
-- **Asynchronous Task Queue**: Uses Redis & Background workers to decouple API requests from heavy satellite download and model processing steps.
-- **Extensible PyTorch Model Registry**:
-  - `landcover_unet`: 4-class semantic land cover segmentation (Water, Vegetation, Built-up, Barren).
-  - `water_detector`: Deep NDWI/MNDWI spectral water detector.
-- **Geospatial Processing & Storage**:
-  - Exports standard **GeoTIFF** rasters preserving affine geotransforms and spatial CRS (`EPSG:4326`).
-  - Vectorizes class prediction masks to **GeoJSON** polygons.
-  - Computes class surface area coverage ($km^2$).
-  - Storage into **PostGIS** and **MinIO** object storage (with seamless local file & SQLite fallback).
-- **Interactive Leaflet Dashboard**: Built-in visual map interface at `http://localhost:8000/`.
-- **Production DevOps Setup**: Docker Compose, pytest suite, and GitHub Actions CI workflow.
+### 🛰️ On-Demand Satellite Data
+
+* Dynamically queries the **Sentinel-2 Surface Reflectance Harmonized** collection through Google Earth Engine.
+* Supports AOI, date-range, and cloud-cover constraints.
+* Retrieves only the imagery required for an inference job rather than maintaining a large local satellite archive.
+* Performs multispectral preprocessing before model inference.
+
+### ⚙️ Asynchronous ML Inference
+
+* FastAPI handles lightweight API operations and job management.
+* Redis + RQ decouples long-running geospatial and ML workloads from the API process.
+* Workers independently execute imagery retrieval, preprocessing, inference, and post-processing.
+* Job states are tracked through a persistent database.
+
+### 🧠 Extensible PyTorch Model Registry
+
+GeoServe uses a model registry architecture so additional geospatial ML models can be integrated without redesigning the inference pipeline.
+
+Current models include:
+
+* **`landcover_unet`**
+
+  * U-Net based semantic segmentation architecture.
+  * Four target classes:
+
+    * Water
+    * Vegetation
+    * Built-up
+    * Barren
+  * Uses Sentinel-2 multispectral bands.
+
+* **`water_detector`**
+
+  * PyTorch-based water detection model.
+  * Uses multispectral bands together with NDWI/MNDWI-derived features.
+  * Produces binary water/non-water predictions.
+
+### 🌍 Geospatial Processing
+
+Inference outputs are converted into standard geospatial formats:
+
+* **GeoTIFF** raster prediction outputs
+* **GeoJSON** vectorized prediction polygons
+* Per-class surface-area statistics
+* Spatial reference and raster geotransform preservation
+
+### 💾 Storage Architecture
+
+GeoServe separates job metadata from larger ML output files:
+
+* PostgreSQL/PostGIS-ready persistence for job and geospatial metadata
+* MinIO-compatible object storage for generated raster artifacts
+* Local filesystem fallback for development environments
+* SQLite fallback for lightweight local development
+
+### 🗺️ Interactive Dashboard
+
+A built-in **Leaflet** dashboard provides a simple interface for:
+
+* Selecting inference models
+* Submitting AOIs and date ranges
+* Monitoring job progress
+* Viewing inference results
+* Accessing generated GeoTIFF and GeoJSON outputs
+
+### 🐳 Production-Oriented DevOps
+
+The project includes:
+
+* Docker-based API and worker containers
+* Docker Compose orchestration
+* Redis
+* PostgreSQL/PostGIS
+* MinIO object storage
+* pytest test suite
+* GitHub Actions CI
 
 ---
 
-## 🚀 Quickstart Guide
+## 🔄 Job Lifecycle
 
-### 1. Requirements
-- Python 3.10+
-- (Optional) Docker & Docker Compose
-- Google Earth Engine authenticated credentials or ADC setup.
+Each inference request is processed as an asynchronous job:
 
-### 2. Environment Setup
-
-```bash
-# Clone or navigate to directory
-cd geoserve
-
-# Create virtual environment
-python -m venv venv
-# On Windows:
-venv\Scripts\activate
-# On Linux/macOS:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+```text
+PENDING
+   │
+   ▼
+PROCESSING
+   │
+   ├──────────────► FAILED
+   │
+   ▼
+COMPLETED
 ```
 
-### 3. Running the Server & Dashboard
-
-```bash
-# Start FastAPI application
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-Open **`http://localhost:8000`** in your browser to view the interactive UI, or **`http://localhost:8000/docs`** for interactive OpenAPI documentation.
-
-### 4. Running via Docker Compose
-
-```bash
-docker-compose up --build
-```
-This launches:
-- `api` (FastAPI at `http://localhost:8000`)
-- `worker` (Python Redis RQ worker)
-- `redis` (Redis queue at `:6379`)
-- `postgres` (PostGIS database at `:5432`)
-- `minio` (MinIO Object Storage at `:9000`, Console at `:9001`)
+The worker reports progress throughout the pipeline, allowing clients to monitor long-running inference jobs through the REST API.
 
 ---
 
 ## 📡 REST API Reference
 
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/health` | System health status & GEE project ID check |
-| `GET` | `/api/v1/models` | List registered ML models, versions, input bands, and target classes |
-| `POST` | `/api/v1/jobs` | Submit satellite ML inference job (AOI, date range, model) |
-| `GET` | `/api/v1/jobs` | List submitted jobs with status filtering |
-| `GET` | `/api/v1/jobs/{job_id}` | Poll job status, execution timeline, and progress |
-| `GET` | `/api/v1/jobs/{job_id}/result` | Retrieve class surface area metrics ($km^2$) and vectorized GeoJSON |
-| `GET` | `/api/v1/jobs/{job_id}/raster` | Download output spatial GeoTIFF raster file |
+| Method | Endpoint                       | Description                                                          |
+| ------ | ------------------------------ | -------------------------------------------------------------------- |
+| `GET`  | `/health`                      | System health and configuration status                               |
+| `GET`  | `/api/v1/models`               | List registered ML models, versions, input bands, and target classes |
+| `POST` | `/api/v1/jobs`                 | Submit a satellite ML inference job                                  |
+| `GET`  | `/api/v1/jobs`                 | List submitted jobs with optional status filtering                   |
+| `GET`  | `/api/v1/jobs/{job_id}`        | Retrieve job status and progress                                     |
+| `GET`  | `/api/v1/jobs/{job_id}/result` | Retrieve inference statistics and GeoJSON                            |
+| `GET`  | `/api/v1/jobs/{job_id}/raster` | Download the generated GeoTIFF                                       |
+
+### Example Job Request
+
+```json
+{
+  "model_id": "landcover_unet",
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "cloud_cover_max": 20,
+  "aoi": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [76.20, 9.90],
+        [76.30, 9.90],
+        [76.30, 10.00],
+        [76.20, 10.00],
+        [76.20, 9.90]
+      ]
+    ]
+  }
+}
+```
 
 ---
 
 ## 🧪 Testing
 
-Execute the automated test suite with `pytest`:
+The project includes automated tests covering:
+
+* FastAPI endpoint behavior
+* Pydantic request validation
+* Job creation and status handling
+* PyTorch model forward passes
+* Model output shape and class validation
+* Preprocessor tensor conversion
+* NaN/Inf handling
+* GEE imagery retrieval and fallback behavior
+* End-to-end inference pipeline execution
+
+Run the test suite with:
 
 ```bash
 pytest -v
 ```
 
-Tests cover:
-- FastAPI endpoint responses & Pydantic validation
-- PyTorch model forward passes & shape consistency
-- Preprocessor tensor conversions & NaN handling
-- GEE fetching fallback mechanisms
-- End-to-end inference pipeline execution
+---
+
+## 🐳 Running with Docker
+
+```bash
+docker compose up --build
+```
+
+The main services include:
+
+```text
+FastAPI API
+Redis
+RQ Worker
+PostgreSQL/PostGIS
+MinIO
+```
+
+API documentation is available through FastAPI's automatically generated Swagger interface.
+
+---
+
+## 📁 Project Structure
+
+```text
+GeoServe/
+│
+├── app/
+│   ├── api/
+│   ├── db/
+│   ├── schemas/
+│   ├── services/
+│   ├── config.py
+│   └── main.py
+│
+├── worker/
+│   ├── ml/
+│   ├── gee_fetcher.py
+│   ├── preprocessor.py
+│   ├── postprocessor.py
+│   └── worker.py
+│
+├── tests/
+│
+├── .github/
+│   └── workflows/
+│
+├── Dockerfile.api
+├── Dockerfile.worker
+├── docker-compose.yml
+├── requirements.txt
+├── pyproject.toml
+├── .env.example
+├── README.md
+└── run_demo.py
+```
+
+---
+
+## 🎯 Engineering Objectives
+
+GeoServe demonstrates practical implementation of:
+
+* Geospatial data ingestion
+* Remote-sensing image processing
+* PyTorch inference pipelines
+* Semantic segmentation
+* Spectral feature engineering
+* Asynchronous job processing
+* REST API design
+* Model registry architecture
+* Object storage
+* Containerized deployment
+* Automated testing
+* CI/CD workflows
+
+The architecture is intentionally designed so additional ML models, data sources, workers, and storage backends can be integrated without redesigning the core inference API.
+
+---
+
+## 🚧 Current Limitations & Future Improvements
+
+GeoServe is a **production-oriented engineering project**, not a claim of production readiness.
+
+Planned improvements include:
+
+* Authentication and authorization
+* Production secrets management
+* PostgreSQL/PostGIS spatial data types
+* Robust worker retries and job recovery
+* Model checkpoint management and versioned artifacts
+* Improved raster tiling/chunked processing for large AOIs
+* More accurate geodesic/equal-area area calculations
+* Prometheus/Grafana observability
+* API rate limiting
+* Improved frontend visualization
+* GPU-enabled worker deployment
+* Stronger production security and deployment configuration
 
 ---
 
 ## 📄 License
 
-MIT License. Developed for production geospatial ML inference systems.
+MIT License
